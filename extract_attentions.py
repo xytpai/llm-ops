@@ -105,10 +105,22 @@ if __name__ == '__main__':
     for meta in metas:
         args.append([meta.batch_size, meta.seq_len, meta.nhead_q, meta.nhead_kv, meta.head_dim])
     args = sorted(set(map(tuple, args)))
+    from aiter_test_flash_attn import test_case
+    from tqdm import tqdm
+    pbar = tqdm(total=len(args))
+    results = []
     for arg in args:
         batch_size = arg[0]
         seq_len = arg[1]
         nhead_q = arg[2]
         nhead_kv = arg[3]
         head_dim = arg[4]
-        print(f"{batch_size}, {seq_len}, {nhead_q}, {nhead_kv}, {head_dim}")
+        forward_tflops_bf16, backward_tflops_bf16 = test_case(batch_size, seq_len, nhead_q, nhead_kv, head_dim)
+        # print(f"{batch_size}, {seq_len}, {nhead_q}, {nhead_kv}, {head_dim}")
+        results.append([batch_size, seq_len, nhead_q, nhead_kv, head_dim, forward_tflops_bf16, backward_tflops_bf16])
+        pbar.update(1)
+    results = [['batch_size', 'seq_len', 'nhead_q', 'nhead_kv', 'head_dim', 'forward_tflops_bf16', 'backward_tflops_bf16']] + results
+    import csv
+    with open("output_attns.csv", mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerows(results)
