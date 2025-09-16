@@ -1,14 +1,75 @@
-import os
-import sys
+
+
 import copy
-import glob
-import re
-import csv
 import torch
-import torch.nn.functional as F
 import pandas as pd
-from tqdm import tqdm
-from extract_hf_ops import get_extract_method
+from dataclasses import dataclass
+
+
+def ensure_divisibility(numerator: int, denominator: int) -> None:
+    """Ensure that numerator is divisible by the denominator."""
+    assert numerator % denominator == 0, "{} is not divisible by {}".format(numerator, denominator)
+
+
+def divide_and_check_no_remainder(numerator: int, denominator: int) -> int:
+    """Ensure that numerator is divisible by the denominator and return
+    the division value."""
+    ensure_divisibility(numerator, denominator)
+    return numerator // denominator
+
+
+@dataclass
+class SDPARecord:
+    batch_size: int
+    num_heads_q: int
+    num_heads_kv: int
+    head_dim_qk: int
+    head_dim_v: int
+    seq_len_q: int
+    seq_len_kv: int
+    dtype: str
+    is_causal: bool = True
+
+
+class SDPAAnalyzer:
+    def __init__(self, record: SDPARecord):
+        self.batch_size = record.batch_size
+        self.num_heads_q = record.num_heads_q
+        self.num_heads_kv = record.num_heads_kv
+        self.head_dim_qk = record.head_dim_qk
+        self.head_dim_v = record.head_dim_v
+        self.seq_len_q = record.seq_len_q
+        self.seq_len_kv = record.seq_len_kv
+        self.dtype = record.dtype
+        self.is_causal = record.is_causal
+        if record.dtype == "torch.bfloat16" or record.dtype == "torch.float16":
+            self.element_bytes = 2
+        elif record.dtype == "torch.float":
+            self.element_bytes = 4
+        else:
+            raise "Data type not supported"
+        assert self.num_heads_q % self.num_heads_kv == 0
+
+    def getFLOP(self):
+        L2 = self.seq_len_q * self.seq_len_kv
+        if self.is_causal:
+            n = min(self.seq_len_q, self.seq_len_kv)
+            L2eff = (self.seq_len_kv + self.seq_len_kv - n + 1) * n / 2.0
+        else:
+            L2eff = L2
+        BH = self.batch_size * self.num_heads_q
+        qk_FLOP = 2 * BH * L2eff * self.head_dim_qk
+        qksv_FLOP = 2 * BH * L2 * self.head_dim_v
+        return qk_FLOP + qksv_FLOP
+
+    def getFlashAttnBytes(self):
+        read_q = self.batch_size * self.num_heads_q * self.seq_len_q * self.head_dim_qk
+        read_k = (
+            self.batch_size * self.num_heads_kv * self.seq_len_kv * self.head_dim_qk
+        )
+        read_v = self.batch_size * self.num_heads_kv * self.seq_len_kv * self.head_dim_v
+        write_o = self.batch_size * self.num_heads_q * self.seq_len_q * self.head_dim_v
+        return (read_q + read_k + read_v + write_o) * self.element_bytes
 
 
 def benchmark_func(num_iters=101, num_warmup=3):
@@ -197,124 +258,3 @@ def get_trace_perf(prof, num_iters):
         else:
             df.at[avg_name, el] = df[el].sum() / actual_iters
     return df.at[avg_name, "device_time_sum"]
-
-
-torch.set_default_device('cuda')
-fp_8_dtype = torch.float8_e4m3fn
-
-
-@benchmark_func()
-def run_torch_gemm(x, w, scale_a, scale_b):
-    if x.dtype == fp_8_dtype:
-        out = torch._scaled_mm(x, w.t(),
-                out_dtype=torch.bfloat16,
-                scale_a=scale_a,
-                scale_b=scale_b,
-                bias=None,
-            )
-    else:
-        out = F.linear(x, w)
-    return out
-
-
-def test_gemm(dtype, m, n, k):
-    x = torch.randn((m, k), dtype=torch.float).to(dtype)
-    w = torch.randn((n, k), dtype=torch.float).to(dtype)
-    scale_a = torch.ones(1, dtype=torch.float)
-    scale_b = torch.ones(1, dtype=torch.float)
-    device_us = float(run_torch_gemm(x, w, scale_a, scale_b))
-    tflops = 2 * m * n * k / (device_us) / 1e6
-    return tflops
-
-
-@benchmark_func()
-def run_torch_sdpa(q, k, v):
-    out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=True)
-    return out
-
-
-def test_sdpa(dtype, batch_size, seq_len, nhead_q, nhead_kv, head_dim):
-    q = torch.randn((batch_size, seq_len, nhead_q, head_dim), dtype=dtype)
-    k = torch.randn((batch_size, seq_len, nhead_kv, head_dim), dtype=dtype)
-    v = torch.randn((batch_size, seq_len, nhead_kv, head_dim), dtype=dtype)
-    device_us = float(run_torch_sdpa(q, k, v))
-    tflops = device_us
-    return tflops
-
-
-def test_model_gemm(config_file):
-    print(config_file)
-    method = get_extract_method(config_file)(config_file)
-    print("nparams:", method.check_num_parameters(), "B")
-    dtypes = [fp_8_dtype, torch.bfloat16]
-    tp_sizes = [1, 4, 8]
-    ms = [i * 1024 for i in [2]]
-    pbar = tqdm(total=len(dtypes) * len(tp_sizes) * len(ms))
-    results = []
-    for dtype in dtypes:
-        for tp_size in tp_sizes:
-            for m in ms:
-                gemm_shapes = method.extract_gemm_shapes(m=m, tp_size=tp_size)
-                for mnk in gemm_shapes:
-                    mnk = mnk.split(',')
-                    m = int(mnk[0].strip())
-                    n = int(mnk[1].strip())
-                    k = int(mnk[2].strip())
-                    tflops = test_gemm(dtype, m, n, k)
-                    results.append([config_file, dtype, tp_size, m, n, k, tflops])
-                pbar.update(1)
-    return results
-
-
-def test_model_sdpa(config_file):
-    print(config_file)
-    method = get_extract_method(config_file)(config_file)
-    print("nparams:", method.check_num_parameters(), "B")
-    dtypes = [torch.bfloat16]
-    tp_sizes = [1, 4]
-    batch_sizes = [1, 4, 8]
-    seq_lens = [1024, 2048]
-    pbar = tqdm(total=len(dtypes) * len(tp_sizes) * len(batch_sizes) * len(seq_lens))
-    results = []
-    for dtype in dtypes:
-        for tp_size in tp_sizes:
-            for batch_size in batch_sizes:
-                for seq_len in seq_lens:
-                    attention_shapes, cnt = method.extract_attentions(batch_size=batch_size, seq_len=seq_len, tp_size=tp_size)
-                    for shape in attention_shapes:
-                        batch_size, seq_len, nhead_q, nhead_kv, head_dim, _ = re.findall(r"\d+", shape)
-                        batch_size = int(batch_size)
-                        seq_len = int(seq_len)
-                        nhead_q = int(nhead_q)
-                        nhead_kv = int(nhead_kv)
-                        head_dim = int(head_dim)
-                        tflops = test_sdpa(dtype, batch_size, seq_len, nhead_q, nhead_kv, head_dim)
-                        results.append([config_file, dtype, batch_size, seq_len, nhead_q, nhead_kv, head_dim, tflops])
-                    pbar.update(1)
-    return results
-
-
-if __name__ == "__main__":
-    config_dir = sys.argv[1]
-    config_files = sorted(glob.glob(f"{config_dir}/*.json"))
-
-    print('\ntest sdpas ...\n')
-    attention_results = []
-    for config_file in config_files:
-        attention_results += test_model_sdpa(config_file)
-    datas = [['config_file', 'dtype', 'batch_size', 'seq_len', 'nhead_q', 'nhead_kv', 'head_dim', 'tflops']]
-    datas += attention_results
-    with open("output_attentions.csv", mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerows(datas)
-    
-
-    print('\ntest gemms ...\n')
-    gemm_results = []
-    for config_file in config_files:
-        gemm_results += test_model_gemm(config_file)
-    datas = [['config_file', 'dtype', 'tp_size', 'm', 'n', 'k', 'tflops']]
-    datas += gemm_results
-    with open("output_gemms.csv", mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerows(datas)

@@ -1,24 +1,21 @@
-import os
-import re
 import sys
-import glob
 import json
 import inspect
+from dataclasses import dataclass
+from utils import divide_and_check_no_remainder
 
 
-def ensure_divisibility(numerator: int, denominator: int) -> None:
-    """Ensure that numerator is divisible by the denominator."""
-    assert numerator % denominator == 0, "{} is not divisible by {}".format(numerator, denominator)
+@dataclass
+class GEMMOpMeta:
+    m: int
+    n: int
+    k: int
+    dtype: str
+    flag: str = ""
+    count: int = 1
 
 
-def divide_and_check_no_remainder(numerator: int, denominator: int) -> int:
-    """Ensure that numerator is divisible by the denominator and return
-    the division value."""
-    ensure_divisibility(numerator, denominator)
-    return numerator // denominator
-
-
-class ExtractHFOpsBase:
+class ExtractGeemsBase:
     def __init__(self, config_file):
         self.load_config(config_file)
     
@@ -52,10 +49,10 @@ class ExtractHFOpsBase:
         kv_n = divide_and_check_no_remainder(kv_n, tp_size)
         qkv_k = self.hidden_size
         metas = [
-            f"m={m}, n={q_n + 2 * kv_n}, k={qkv_k}, dtype={self.dtype}, flag=qkv_proj",
-            f"m={m}, n={qkv_k}, k={q_n}, dtype={self.dtype}, flag=o_proj",
+            GEMMOpMeta(m=m, n=(q_n + 2 * kv_n), k=qkv_k, dtype=self.dtype, flag="qkv_proj", count=self.num_hidden_layers),
+            GEMMOpMeta(m=m, n=qkv_k, k=q_n, dtype=self.dtype, flag="o_proj", count=self.num_hidden_layers),
         ]
-        return metas, self.num_hidden_layers
+        return metas
     
     def extract_ffn_dense_gemms(self, m=1, tp_size=1):
         metas = []
@@ -65,38 +62,27 @@ class ExtractHFOpsBase:
             down_k = gate_up_n
             down_n = gate_up_k
             metas = [
-                f"m={m}, n={gate_up_n * 2}, k={gate_up_k}, dtype={self.dtype}, flag=gate_up_proj", 
-                f"m={m}, n={down_n}, k={down_k}, dtype={self.dtype}, flag=down_proj", 
+                GEMMOpMeta(m=m, n=(gate_up_n * 2), k=gate_up_k, dtype=self.dtype, flag="gate_up_proj", count=self.ffn_dense_layers),
+                GEMMOpMeta(m=m, n=down_n, k=down_k, dtype=self.dtype, flag="down_proj", count=self.ffn_dense_layers),
             ]
-        return metas, self.ffn_dense_layers
+        return metas
 
     def extract_ffn_moe_gemms(self, m=1, tp_size=1):
         metas = []
         if self.ffn_moe_layers > 0:
             metas = [
-                f"m={m}, n={self.num_experts}, k={self.hidden_size}, dtype={self.dtype}, flag=experts_selection",
+                GEMMOpMeta(m=m, n=(self.num_experts), k=self.hidden_size, dtype=self.dtype, flag="experts_selection", count=self.ffn_moe_layers),
             ]
-        return metas, self.ffn_moe_layers
-    
-    def extract_attentions(self, batch_size=1, seq_len=1, tp_size=1):
-        nhead_q = divide_and_check_no_remainder(self.config['num_attention_heads'], tp_size)
-        nhead_kv = divide_and_check_no_remainder(self.config['num_key_value_heads'], tp_size)
-        head_dim = self.head_dim
-        metas = [
-            f"batch_size={batch_size}, seq_len={seq_len}, nhead_q={nhead_q}, nhead_kv={nhead_kv}, head_dim={head_dim}, dtype={self.dtype}", 
-        ]
-        return metas, self.num_hidden_layers
-        
+        return metas
+            
     def check_num_parameters(self):
-        gemms = []
+        metas = []
         num_params = 0
         for name, method in inspect.getmembers(self, predicate=inspect.ismethod):
-            if name.startswith('extract_') and name.endswith('_gemms'):
-                method_gemms, method_gemms_cnt = method(1, 1)
-                gemms += method_gemms * method_gemms_cnt
-        for gemm_meta in gemms:
-            m, n, k, _ = nums = re.findall(r"\d+", gemm_meta)
-            num_params += int(n) * int(k)
+            if name.startswith('extract_'):
+                metas += method(m=1, tp_size=1)
+        for meta in metas:
+            num_params += meta.n * meta.k * meta.count
         num_params += self.hidden_size * self.config['vocab_size'] # embedding
         if self.ffn_moe_layers > 0:
             num_params += 3 * self.hidden_size * self.moe_intermediate_size * self.num_experts * self.ffn_moe_layers
@@ -106,22 +92,15 @@ class ExtractHFOpsBase:
         assert relative_diff < 1e-2, "The calculated number of parameters {}B is different from the expected {}B".format(num_params, expected_params)
         return num_params
     
-    def extract_gemm_shapes(self, m=1, tp_size=1):
-        gemms = []
+    def metas(self, m=1, tp_size=1):
+        metas = []
         for name, method in inspect.getmembers(self, predicate=inspect.ismethod):
-            if name.startswith('extract_') and name.endswith('_gemms'):
-                method_gemms, _ = method(m, tp_size)
-                gemms += method_gemms
-        shapes = []
-        for gemm_meta in gemms:
-            # print(gemm_meta)
-            m, n, k, _ = nums = re.findall(r"\d+", gemm_meta)
-            shapes.append(f"{m}, {n}, {k}")
-        shapes = sorted(list(set(shapes)))
-        return shapes
+            if name.startswith('extract_'):
+                metas += method(m=m, tp_size=tp_size)
+        return metas
 
 
-class ExtractHFOpsDeepSeek(ExtractHFOpsBase):
+class ExtractGeemsDeepSeek(ExtractGeemsBase):
     def __init__(self, config_file):
         super().__init__(config_file)
         self.qk_nope_head_dim = self.config['qk_nope_head_dim']
@@ -150,11 +129,11 @@ class ExtractHFOpsDeepSeek(ExtractHFOpsBase):
             o_k = divide_and_check_no_remainder(self.num_heads * self.v_head_dim, tp_size)
             o_n = self.hidden_size
             metas = [
-                f"m={m}, n={q_a_n}, k={q_a_k}, dtype={self.dtype}, flag=q_a_proj",
-                f"m={m}, n={q_b_n}, k={q_b_k}, dtype={self.dtype}, flag=q_b_proj",
-                f"m={m}, n={kv_a_n}, k={kv_a_k}, dtype={self.dtype}, flag=kv_a_proj",
-                f"m={m}, n={kv_b_n}, k={kv_b_k}, dtype={self.dtype}, flag=kv_b_proj",
-                f"m={m}, n={o_n}, k={o_k}, dtype={self.dtype}, flag=o_proj",
+                GEMMOpMeta(m=m, n=q_a_n, k=q_a_k, dtype=self.dtype, flag="q_a_proj", count=self.num_hidden_layers),
+                GEMMOpMeta(m=m, n=q_b_n, k=q_b_k, dtype=self.dtype, flag="q_b_proj", count=self.num_hidden_layers),
+                GEMMOpMeta(m=m, n=kv_a_n, k=kv_a_k, dtype=self.dtype, flag="kv_a_proj", count=self.num_hidden_layers),
+                GEMMOpMeta(m=m, n=kv_b_n, k=kv_b_k, dtype=self.dtype, flag="kv_b_proj", count=self.num_hidden_layers),
+                GEMMOpMeta(m=m, n=o_n, k=o_k, dtype=self.dtype, flag="o_proj", count=self.num_hidden_layers),
             ]
         else:
             qkv_a_k = self.hidden_size
@@ -166,12 +145,12 @@ class ExtractHFOpsDeepSeek(ExtractHFOpsBase):
             o_k = divide_and_check_no_remainder(self.num_heads * self.v_head_dim, tp_size)
             o_n = self.hidden_size
             metas = [
-                f"m={m}, n={qkv_a_n}, k={qkv_a_k}, dtype={self.dtype}, flag=qkv_a_proj",
-                f"m={m}, n={q_b_n}, k={q_b_k}, dtype={self.dtype}, flag=q_b_proj",
-                f"m={m}, n={kv_b_n}, k={kv_b_k}, dtype={self.dtype}, flag=kv_b_proj",
-                f"m={m}, n={o_n}, k={o_k}, dtype={self.dtype}, flag=o_proj",
+                GEMMOpMeta(m=m, n=qkv_a_n, k=qkv_a_k, dtype=self.dtype, flag="qkv_a_proj", count=self.num_hidden_layers),
+                GEMMOpMeta(m=m, n=q_b_n, k=q_b_k, dtype=self.dtype, flag="q_b_proj", count=self.num_hidden_layers),
+                GEMMOpMeta(m=m, n=kv_b_n, k=kv_b_k, dtype=self.dtype, flag="kv_b_proj", count=self.num_hidden_layers),
+                GEMMOpMeta(m=m, n=o_n, k=o_k, dtype=self.dtype, flag="o_proj", count=self.num_hidden_layers),
             ]
-        return metas, self.num_hidden_layers
+        return metas
     
     def extract_ffn_shared_gemms(self, m=1, tp_size=1):
         metas = []
@@ -181,36 +160,24 @@ class ExtractHFOpsDeepSeek(ExtractHFOpsBase):
             down_k = gate_up_n
             down_n = gate_up_k
             metas = [
-                f"m={m}, n={gate_up_n * 2}, k={gate_up_k}, dtype={self.dtype}, flag=gate_up_proj", 
-                f"m={m}, n={down_n}, k={down_k}, dtype={self.dtype}, flag=down_proj", 
+                GEMMOpMeta(m=m, n=(gate_up_n * 2), k=gate_up_k, dtype=self.dtype, flag="gate_up_proj", count=self.ffn_moe_layers),
+                GEMMOpMeta(m=m, n=down_n, k=down_k, dtype=self.dtype, flag="down_proj", count=self.ffn_moe_layers),
             ]
-        return metas, self.ffn_moe_layers
-        
-    def extract_attentions(self, batch_size=1, seq_len=1, tp_size=1):
-        if self.mha:
-            nhead_q = divide_and_check_no_remainder(self.config['num_attention_heads'], tp_size)
-            nhead_kv = divide_and_check_no_remainder(self.config['num_key_value_heads'], tp_size)
-            head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
-            metas = [
-                f"batch_size={batch_size}, seq_len={seq_len}, nhead_q={nhead_q}, nhead_kv={nhead_kv}, head_dim={head_dim}, dtype={self.dtype}", 
-            ]
-            return metas, self.num_hidden_layers
-        else:
-            raise NotImplementedError("Not implemented for non-MHA.")
+        return metas
 
 
-def get_extract_method(config_file):
+def get_method(config_file):
     if 'DeepSeek-V3' in config_file:
-        return ExtractHFOpsDeepSeek
+        return ExtractGeemsDeepSeek
     else:
-        return ExtractHFOpsBase
+        return ExtractGeemsBase
 
 
 if __name__ == '__main__':
     config_file = sys.argv[1]
     print(config_file)
-    eo = get_extract_method(config_file)(config_file)
-    gemm_shapes = eo.extract_gemm_shapes()
-    for mnk in gemm_shapes:
-        print(mnk)
-    print("nparams:", eo.check_num_parameters(), "B")
+    extractor = get_method(config_file)(config_file)
+    metas = extractor.metas()
+    for meta in metas:
+        print(meta)
+    print("nparams:", extractor.check_num_parameters(), "B")
