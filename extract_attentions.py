@@ -1,5 +1,6 @@
 import sys
 import json
+import glob
 import inspect
 from dataclasses import dataclass
 from utils import divide_and_check_no_remainder
@@ -84,9 +85,30 @@ def get_method(config_file):
 
 
 if __name__ == '__main__':
-    config_file = sys.argv[1]
-    print(config_file)
-    extractor = get_method(config_file)(config_file)
-    metas = extractor.metas()
+    config_dir = sys.argv[1]
+    config_files = sorted(glob.glob(f"{config_dir}/*.json"))
+    metas = []
+    for config_file in config_files:
+        print(config_file)
+        extractor = get_method(config_file)(config_file)
+        cfg_ = cfg.attention
+        # for dtype in cfg_.dtypes:
+        if True:
+            for tp_size in cfg_.tp_sizes:
+                for batch_size in cfg_.batch_sizes:
+                    for seq_len in cfg_.seq_lens:
+                        metas += extractor.metas(
+                            batch_size=batch_size, seq_len=seq_len, tp_size=tp_size)
     for meta in metas:
         print(meta)
+    args = []
+    for meta in metas:
+        args.append([meta.batch_size, meta.seq_len, meta.nhead_q, meta.nhead_kv, meta.head_dim])
+    args = sorted(set(map(tuple, args)))
+    for arg in args:
+        batch_size = arg[0]
+        seq_len = arg[1]
+        nhead_q = arg[2]
+        nhead_kv = arg[3]
+        head_dim = arg[4]
+        print(f"{batch_size}, {seq_len}, {nhead_q}, {nhead_kv}, {head_dim}")
