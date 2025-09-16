@@ -194,5 +194,38 @@ if __name__ == '__main__':
     for meta in metas:
         mnks.append([meta.m, meta.n, meta.k])
     mnks = sorted(set(map(tuple, mnks)))
+    mnks.append([8192, 8192, 37888])
+
+    from subprocess import check_call, check_output
+    def get_glops(cmd):
+        cmd = cmd.split(' ')
+        lines = check_output(cmd).decode("utf-8").split("\n")
+        data_line_idx = 0
+        for idx, line in enumerate(lines):
+            if '--Solution index:' in line:
+                data_line_idx = idx - 1
+                break
+        # print(lines[data_line_idx])
+        gflops = float(lines[data_line_idx].strip().split(',')[-3])
+        return gflops
+
+    results = []
+    from tqdm import tqdm
+    pbar = tqdm(total=len(mnks))
     for mnk in mnks:
-        print(f"{mnk[0]}, {mnk[1]}, {mnk[2]}")
+        m = mnk[0]
+        n = mnk[1]
+        k = mnk[2]
+        print(f"{m}, {n}, {k}")
+        cmd_hipblas_bf16 = f"hipblaslt-bench --api_method c -m {m} -n {n} -k {k} --alpha 1 --beta 0 --transA T --transB N --a_type bf16_r --b_type bf16_r --c_type bf16_r --d_type bf16_r --scale_type f32_r --compute_type f32_r --activation_type none --rotating 512 --cold_iters 100 --iters 10000 --initialization trig_float --print_kernel_info"
+        cmd_hipblas_fp8 = f"hipblaslt-bench --api_method c -m {m} -n {n} -k {k} --alpha 1 --beta 0 --transA T --transB N --a_type f8_r --b_type f8_r --c_type bf16_r --d_type bf16_r --scale_type f32_r --compute_type f32_r --activation_type none --rotating 512 --cold_iters 100 --iters 10000 --initialization trig_float --print_kernel_info"
+        tflops_bf16 = get_glops(cmd_hipblas_bf16) / 1000.0
+        tflops_fp8 = get_glops(cmd_hipblas_fp8) / 1000.0
+        print(tflops_bf16, tflops_fp8)
+        results.append([m, n, k, tflops_bf16, tflops_fp8])
+        pbar.update(1)
+    results = [['m', 'n', 'k', 'tflops_bf16', 'tflops_fp8']] + results
+    import csv
+    with open("output_gemms.csv", mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerows(results)
