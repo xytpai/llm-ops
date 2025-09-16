@@ -1,8 +1,10 @@
 import sys
 import json
+import glob
 import inspect
 from dataclasses import dataclass
 from utils import divide_and_check_no_remainder
+from bench_config import cfg
 
 
 @dataclass
@@ -174,10 +176,23 @@ def get_method(config_file):
 
 
 if __name__ == '__main__':
-    config_file = sys.argv[1]
-    print(config_file)
-    extractor = get_method(config_file)(config_file)
-    metas = extractor.metas()
+    config_dir = sys.argv[1]
+    config_files = sorted(glob.glob(f"{config_dir}/*.json"))
+    metas = []
+    for config_file in config_files:
+        print(config_file)
+        extractor = get_method(config_file)(config_file)
+        print("nparams:", extractor.check_num_parameters(), "B")
+        # for dtype in cfg.gemm.dtypes:
+        if True:
+            for tp_size in cfg.gemm.tp_sizes:
+                for m in cfg.gemm.ms:
+                    metas += extractor.metas(m=m, tp_size=tp_size)
     for meta in metas:
         print(meta)
-    print("nparams:", extractor.check_num_parameters(), "B")
+    mnks = []
+    for meta in metas:
+        mnks.append([meta.m, meta.n, meta.k])
+    mnks = sorted(set(map(tuple, mnks)))
+    for mnk in mnks:
+        print(f"{mnk[0]}, {mnk[1]}, {mnk[2]}")

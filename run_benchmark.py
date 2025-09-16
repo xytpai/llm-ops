@@ -8,10 +8,10 @@ from tqdm import tqdm
 from utils import benchmark_func, SDPARecord, SDPAAnalyzer
 import extract_gemms
 import extract_attentions
+from bench_config import cfg, fp_8_dtype
 
 
 torch.set_default_device('cuda')
-fp_8_dtype = torch.float8_e4m3fn
 
 
 @benchmark_func()
@@ -69,14 +69,12 @@ def test_model_gemm(config_file):
     print(config_file)
     method = extract_gemms.get_method(config_file)(config_file)
     print("nparams:", method.check_num_parameters(), "B")
-    dtypes = [fp_8_dtype, torch.bfloat16]
-    tp_sizes = [1, 4, 8]
-    ms = [i * 1024 for i in [2]]
-    pbar = tqdm(total=len(dtypes) * len(tp_sizes) * len(ms))
+    cfg_ = cfg.gemm
+    pbar = tqdm(total=len(cfg_.dtypes) * len(cfg_.tp_sizes) * len(cfg_.ms))
     results = []
-    for dtype in dtypes:
-        for tp_size in tp_sizes:
-            for m in ms:
+    for dtype in cfg_.dtypes:
+        for tp_size in cfg_.tp_sizes:
+            for m in cfg_.ms:
                 metas = method.metas(m=m, tp_size=tp_size)
                 for meta in metas:
                     m = meta.m
@@ -91,16 +89,13 @@ def test_model_gemm(config_file):
 def test_model_sdpa(config_file):
     print(config_file)
     method = extract_attentions.get_method(config_file)(config_file)
-    dtypes = [torch.bfloat16]
-    tp_sizes = [1, 4]
-    batch_sizes = [1, 4, 8]
-    seq_lens = [1024, 2048]
-    pbar = tqdm(total=len(dtypes) * len(tp_sizes) * len(batch_sizes) * len(seq_lens))
+    cfg_ = cfg.attention
+    pbar = tqdm(total=len(cfg_.dtypes) * len(cfg_.tp_sizes) * len(cfg_.batch_sizes) * len(cfg_.seq_lens))
     results = []
-    for dtype in dtypes:
-        for tp_size in tp_sizes:
-            for batch_size in batch_sizes:
-                for seq_len in seq_lens:
+    for dtype in cfg_.dtypes:
+        for tp_size in cfg_.tp_sizes:
+            for batch_size in cfg_.batch_sizes:
+                for seq_len in cfg_.seq_lens:
                     metas = method.metas(batch_size=batch_size, seq_len=seq_len, tp_size=tp_size)
                     for meta in metas:
                         batch_size = meta.batch_size

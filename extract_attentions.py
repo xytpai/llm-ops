@@ -3,6 +3,7 @@ import json
 import inspect
 from dataclasses import dataclass
 from utils import divide_and_check_no_remainder
+from bench_config import cfg
 
 
 @dataclass

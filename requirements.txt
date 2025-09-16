@@ -6,3 +6,4 @@ accelerate
 transformers
 pandas
 tqdm
+addict
