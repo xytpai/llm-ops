@@ -1,4 +1,5 @@
 import sys
+import time
 import json
 import glob
 import inspect
@@ -198,6 +199,7 @@ if __name__ == '__main__':
 
     from subprocess import check_call, check_output
     def get_glops(cmd):
+        time.sleep(0.2)
         cmd = cmd.split(' ')
         lines = check_output(cmd).decode("utf-8").split("\n")
         data_line_idx = 0
@@ -219,12 +221,16 @@ if __name__ == '__main__':
         print(f"{m}, {n}, {k}")
         cmd_hipblas_bf16 = f"hipblaslt-bench --api_method c -m {m} -n {n} -k {k} --alpha 1 --beta 0 --transA T --transB N --a_type bf16_r --b_type bf16_r --c_type bf16_r --d_type bf16_r --scale_type f32_r --compute_type f32_r --activation_type none --rotating 512 --cold_iters 100 --iters 10000 --initialization trig_float --print_kernel_info"
         cmd_hipblas_fp8 = f"hipblaslt-bench --api_method c -m {m} -n {n} -k {k} --alpha 1 --beta 0 --transA T --transB N --a_type f8_r --b_type f8_r --c_type bf16_r --d_type bf16_r --scale_type f32_r --compute_type f32_r --activation_type none --rotating 512 --cold_iters 100 --iters 10000 --initialization trig_float --print_kernel_info"
+        cmd_hipblas_bf16_z = f"hipblaslt-bench --api_method c -m {m} -n {n} -k {k} --alpha 1 --beta 0 --transA T --transB N --a_type bf16_r --b_type bf16_r --c_type bf16_r --d_type bf16_r --scale_type f32_r --compute_type f32_r --activation_type none --rotating 512 --cold_iters 100 --iters 10000 --initialization zero --print_kernel_info"
+        cmd_hipblas_fp8_z = f"hipblaslt-bench --api_method c -m {m} -n {n} -k {k} --alpha 1 --beta 0 --transA T --transB N --a_type f8_r --b_type f8_r --c_type bf16_r --d_type bf16_r --scale_type f32_r --compute_type f32_r --activation_type none --rotating 512 --cold_iters 100 --iters 10000 --initialization zero --print_kernel_info"
         tflops_bf16 = get_glops(cmd_hipblas_bf16) / 1000.0
         tflops_fp8 = get_glops(cmd_hipblas_fp8) / 1000.0
-        print(tflops_bf16, tflops_fp8)
-        results.append([m, n, k, tflops_bf16, tflops_fp8])
+        tflops_bf16_z = get_glops(cmd_hipblas_bf16_z) / 1000.0
+        tflops_fp8_z = get_glops(cmd_hipblas_fp8_z) / 1000.0
+        print(f"m:{m}, n:{n}, k:{k}, tflops_bf16:{tflops_bf16}, tflops_bf16_z:{tflops_bf16_z}, tflops_fp8:{tflops_fp8}, tflops_fp8_z:{tflops_fp8_z}")
+        results.append([m, n, k, tflops_bf16, tflops_bf16_z, tflops_fp8, tflops_fp8_z])
         pbar.update(1)
-    results = [['m', 'n', 'k', 'tflops_bf16', 'tflops_fp8']] + results
+    results = [['m', 'n', 'k', 'tflops_bf16', 'tflops_bf16_z', 'tflops_fp8', 'tflops_fp8_z']] + results
     import csv
     with open("output_gemms.csv", mode="w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
