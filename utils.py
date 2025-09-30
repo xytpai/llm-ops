@@ -8,7 +8,8 @@ from dataclasses import dataclass
 
 def ensure_divisibility(numerator: int, denominator: int) -> None:
     """Ensure that numerator is divisible by the denominator."""
-    assert numerator % denominator == 0, "{} is not divisible by {}".format(numerator, denominator)
+    assert numerator % denominator == 0, "{} is not divisible by {}".format(
+        numerator, denominator)
 
 
 def divide_and_check_no_remainder(numerator: int, denominator: int) -> int:
@@ -76,7 +77,8 @@ def benchmark_func(num_iters=101, num_warmup=3):
     def decorator(func):
         def wrapper(*args, **kwargs):
             device = torch.cuda.current_device()
-            input_bytes = sum([arg.nbytes for arg in args if isinstance(arg, torch.Tensor) and arg.device.index == device])
+            input_bytes = sum([arg.nbytes for arg in args if isinstance(
+                arg, torch.Tensor) and arg.device.index == device])
             input_bytes += 1
             torch.cuda.synchronize()
             torch.cuda.reset_peak_memory_stats(device)
@@ -102,7 +104,8 @@ def benchmark_func(num_iters=101, num_warmup=3):
                 _ = func(*args, **kwargs)
             torch.cuda.synchronize()
             with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+                activities=[torch.profiler.ProfilerActivity.CPU,
+                            torch.profiler.ProfilerActivity.CUDA],
                 profile_memory=False,
                 with_stack=False,
                 with_modules=True
@@ -115,7 +118,7 @@ def benchmark_func(num_iters=101, num_warmup=3):
             # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10000))
             time_us = get_trace_perf(prof, num_iters)
             # print(time_us)
-            return time_us
+            return float(time_us)
         return wrapper
     return decorator
 
@@ -123,7 +126,8 @@ def benchmark_func(num_iters=101, num_warmup=3):
 def post_process_data(df, num_iters, warm_iter=1):
     """remove abnormal data"""
 
-    device_df = df[df["device_type"].astype(str).str.contains("DeviceType.CUDA")]
+    device_df = df[df["device_type"].astype(
+        str).str.contains("DeviceType.CUDA")]
     # print("devicedf is ", device_df)
     if device_df.empty:
         return [], 0
@@ -135,7 +139,7 @@ def post_process_data(df, num_iters, warm_iter=1):
     if len(device_df) % num_iters == 0:
         kernels_num = int(len(device_df) / num_iters)
     else:
-        ##get correct kernel num
+        # get correct kernel num
         name_list = device_df["name"].tolist()
         max_kernel_num = 20
         n = len(name_list)
@@ -201,7 +205,7 @@ def get_trace_perf(prof, num_iters):
     for el in prof.events():
         df.append([getattr(el, x, None) for x in cols])
     df = pd.DataFrame(df, columns=cols)
-    ###remove abnormal data
+    # remove abnormal data
     dropped_num = warm_iter
     dropped_indexs, dropped_num = post_process_data(
         df, num_iters + warm_iter, warm_iter

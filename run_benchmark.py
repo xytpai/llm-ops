@@ -4,14 +4,10 @@ import glob
 import csv
 import torch
 import torch.nn.functional as F
-from tqdm import tqdm
-from utils import benchmark_func, SDPARecord, SDPAAnalyzer
+
 import extract_gemms
 import extract_attentions
 from bench_config import cfg, fp_8_dtype
-
-
-torch.set_default_device('cuda')
 
 
 @benchmark_func()
