@@ -7,20 +7,24 @@ import inspect
 from tqdm import tqdm
 import torch.nn.functional as F
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from utils import divide_and_check_no_remainder, benchmark_func
 from bench_config import cfg
 
 
 class GemmInterface(ABC):
-    def __init__(self, device='cuda'):
+    def __init__(self, name='default', device='cuda'):
+        self.name = name
         self.device = device
 
     def create_inputs(self, meta) -> None:
         self.m = meta.m
         self.n = meta.m
         self.k = meta.k
-        self.dtype = eval('torch.' + meta.dtype)
+        if isinstance(meta.dtype, str):
+            self.dtype = eval('torch.' + meta.dtype)
+        else:
+            self.dtype = meta.dtype
         self.x = torch.randn((self.m, self.k), dtype=torch.float,
                              device=self.device).to(self.dtype)
         self.w = torch.randn((self.n, self.k), dtype=torch.float,
@@ -40,26 +44,29 @@ class GemmInterface(ABC):
         self.create_inputs(meta)
         device_us = self._eval()
         tflops = 2 * self.m * self.n * self.k / (device_us) / 1e6
-        meta.tflops = tflops
+        meta.tflops[self.name] = tflops
         return meta
 
 
 @dataclass
 class GEMMOpMeta:
-    m: int
-    n: int
-    k: int
-    dtype: str
+    model_name: str = ""
+    dtype: str = ""
+    m: int = 0
+    n: int = 0
+    k: int = 0
     flag: str = ""
     count: int = 1
-    model_name: str = ""
     tp_size: int = 1
-    tflops: float = 0.0
+    tflops: dict = field(default_factory=dict)
 
 
 class ExtractGeemsBase:
     def __init__(self, config_file):
         self.load_config(config_file)
+
+    def set_dtype(self, dtype: str):
+        self.dtype = dtype
 
     def load_config(self, config_file):
         with open(config_file, 'r', encoding='utf-8') as f:
@@ -83,7 +90,7 @@ class ExtractGeemsBase:
             self.ffn_dense_layers = self.num_hidden_layers
             self.ffn_moe_layers = 0
         self.num_experts = self.config.get('num_experts', None)
-        self.model_name = os.path.basename(config_file)
+        self.model_name = os.path.basename(config_file).replace('.json', '')
 
     def extract_attention_gemms(self, m=1, tp_size=1):
         q_n = self.head_dim * self.config['num_attention_heads']
@@ -300,6 +307,9 @@ if __name__ == '__main__':
         print(f"{mnk[0]}, {mnk[1]}, {mnk[2]}")
 
     class TorchGemmTest(GemmInterface):
+        def __init__(self):
+            super().__init__('torch', 'cuda')
+
         def eval(self):
             return F.linear(self.x, self.w)
 

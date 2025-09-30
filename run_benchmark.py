@@ -4,127 +4,98 @@ import glob
 import csv
 import torch
 import torch.nn.functional as F
+import csv
+from dataclasses import asdict
 
 import extract_gemms
 import extract_attentions
 from bench_config import cfg, fp_8_dtype
 
 
-@benchmark_func()
-def run_torch_gemm(x, w, scale_a, scale_b):
-    if x.dtype == fp_8_dtype:
-        out = torch._scaled_mm(x, w.t(),
-                out_dtype=torch.bfloat16,
-                scale_a=scale_a,
-                scale_b=scale_b,
-                bias=None,
-            )
-    else:
-        out = F.linear(x, w)
-    return out
+class TorchGemmTest(extract_gemms.GemmInterface):
+    def __init__(self):
+        super().__init__('torch', 'cuda')
+
+    def eval(self):
+        if self.x.dtype == fp_8_dtype:
+            out = torch._scaled_mm(self.x, self.w.t(),
+                    out_dtype=torch.bfloat16,
+                    scale_a=self.scale_a,
+                    scale_b=self.scale_b,
+                    bias=None,
+                )
+        else:
+            out = F.linear(self.x, self.w)
+        return out
 
 
-def test_gemm(dtype, m, n, k):
-    x = torch.randn((m, k), dtype=torch.float).to(dtype)
-    w = torch.randn((n, k), dtype=torch.float).to(dtype)
-    scale_a = torch.ones(1, dtype=torch.float)
-    scale_b = torch.ones(1, dtype=torch.float)
-    device_us = float(run_torch_gemm(x, w, scale_a, scale_b))
-    tflops = 2 * m * n * k / (device_us) / 1e6
-    return tflops
-
-
-@benchmark_func()
-def run_torch_sdpa(q, k, v):
-    out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=True)
-    return out
-
-
-def test_sdpa(dtype, batch_size, seq_len, nhead_q, nhead_kv, head_dim):
-    q = torch.randn((batch_size, seq_len, nhead_q, head_dim), dtype=dtype)
-    k = torch.randn((batch_size, seq_len, nhead_kv, head_dim), dtype=dtype)
-    v = torch.randn((batch_size, seq_len, nhead_kv, head_dim), dtype=dtype)
-    device_us = float(run_torch_sdpa(q, k, v))
-    record = SDPARecord(
-        batch_size=batch_size,
-        num_heads_q=nhead_q,
-        num_heads_kv=nhead_kv,
-        head_dim_qk=head_dim,
-        head_dim_v=head_dim,
-        seq_len_q=seq_len,
-        seq_len_kv=seq_len,
-        dtype=str(dtype),
-        is_causal=True)
-    ana = SDPAAnalyzer(record)
-    total_flop = ana.getFLOP()
-    tflops = total_flop * 1e-6 / device_us
-    return tflops
+class TorchAttentionTest(extract_attentions.AttentionInterface):
+    def __init__(self):
+        super().__init__('torch', 'cuda')
+    
+    def eval(self):
+        return F.scaled_dot_product_attention(self.q, self.k, self.v, dropout_p=0.0, is_causal=True)
 
 
 def test_model_gemm(config_file):
-    print(config_file)
-    method = extract_gemms.get_method(config_file)(config_file)
-    print("nparams:", method.check_num_parameters(), "B")
+    method_class = extract_gemms.get_method(config_file)
+    method = method_class(config_file)
+    print(config_file, "nparams:", method.check_num_parameters(), "B")
     cfg_ = cfg.gemm
-    pbar = tqdm(total=len(cfg_.dtypes) * len(cfg_.tp_sizes) * len(cfg_.ms))
     results = []
     for dtype in cfg_.dtypes:
+        method.set_dtype(dtype)
         for tp_size in cfg_.tp_sizes:
             for m in cfg_.ms:
                 metas = method.metas(m=m, tp_size=tp_size)
-                for meta in metas:
-                    m = meta.m
-                    n = meta.n
-                    k = meta.k
-                    tflops = test_gemm(dtype, m, n, k)
-                    results.append([config_file, dtype, tp_size, m, n, k, tflops])
-                pbar.update(1)
+                metas = method_class.benchmark(metas, TorchGemmTest())
+                results += metas
     return results
 
 
 def test_model_sdpa(config_file):
-    print(config_file)
-    method = extract_attentions.get_method(config_file)(config_file)
+    method_class = extract_attentions.get_method(config_file)
+    method = method_class(config_file)
     cfg_ = cfg.attention
-    pbar = tqdm(total=len(cfg_.dtypes) * len(cfg_.tp_sizes) * len(cfg_.batch_sizes) * len(cfg_.seq_lens))
     results = []
     for dtype in cfg_.dtypes:
+        method.set_dtype(dtype)
         for tp_size in cfg_.tp_sizes:
             for batch_size in cfg_.batch_sizes:
                 for seq_len in cfg_.seq_lens:
                     metas = method.metas(batch_size=batch_size, seq_len=seq_len, tp_size=tp_size)
-                    for meta in metas:
-                        batch_size = meta.batch_size
-                        seq_len = meta.seq_len
-                        nhead_q = meta.nhead_q
-                        nhead_kv = meta.nhead_kv
-                        head_dim = meta.head_dim
-                        tflops = test_sdpa(dtype, batch_size, seq_len, nhead_q, nhead_kv, head_dim)
-                        results.append([config_file, dtype, batch_size, seq_len, nhead_q, nhead_kv, head_dim, tflops])
-                    pbar.update(1)
+                    metas = method_class.benchmark(metas, TorchAttentionTest())
+                    results += metas
     return results
 
 
+def main():
+    for op in cfg.test_scope:
+
+        print(f"\ntest {op} ...\n")
+        
+        if op == 'gemm':
+            results = []
+            for file in cfg.files:
+                results += test_model_gemm(file)
+            results = sorted(results, key=lambda x: str(x))
+            with open("out_gemm.csv", "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=asdict(results[0]).keys())
+                writer.writeheader()
+                for u in results:
+                    writer.writerow(asdict(u))
+            
+        elif op == 'attention':
+            results = []
+            for file in cfg.files:
+                results += test_model_sdpa(file)
+            results = sorted(results, key=lambda x: str(x))
+            with open("out_sdpa.csv", "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=asdict(results[0]).keys())
+                writer.writeheader()
+                for u in results:
+                    writer.writerow(asdict(u))
+
+
 if __name__ == "__main__":
-    config_dir = sys.argv[1]
-    config_files = sorted(glob.glob(f"{config_dir}/*.json"))
-
-    print('\ntest sdpas ...\n')
-    attention_results = []
-    for config_file in config_files:
-        attention_results += test_model_sdpa(config_file)
-    datas = [['config_file', 'dtype', 'batch_size', 'seq_len', 'nhead_q', 'nhead_kv', 'head_dim', 'tflops']]
-    datas += attention_results
-    with open("output_attentions.csv", mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerows(datas)
-
-    print('\ntest gemms ...\n')
-    gemm_results = []
-    for config_file in config_files:
-        gemm_results += test_model_gemm(config_file)
-    datas = [['config_file', 'dtype', 'tp_size', 'm', 'n', 'k', 'tflops']]
-    datas += gemm_results
-    with open("output_gemms.csv", mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerows(datas)
+    main()

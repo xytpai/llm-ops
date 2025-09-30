@@ -7,13 +7,14 @@ import inspect
 from tqdm import tqdm
 import torch.nn.functional as F
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from utils import divide_and_check_no_remainder, benchmark_func, SDPARecord, SDPAAnalyzer
 from bench_config import cfg
 
 
 class AttentionInterface(ABC):
-    def __init__(self, device='cuda'):
+    def __init__(self, name='default', device='cuda'):
+        self.name = name
         self.device = device
 
     def create_inputs(self, meta) -> None:
@@ -22,7 +23,10 @@ class AttentionInterface(ABC):
         self.nhead_q = meta.nhead_q
         self.nhead_kv = meta.nhead_kv
         self.head_dim = meta.head_dim
-        self.dtype = eval('torch.' + meta.dtype)
+        if isinstance(meta.dtype, str):
+            self.dtype = eval('torch.' + meta.dtype)
+        else:
+            self.dtype = meta.dtype
         self.q = torch.randn((self.batch_size, self.seq_len, self.nhead_q,
                              self.head_dim), dtype=self.dtype, device=self.device)
         self.k = torch.randn((self.batch_size, self.seq_len, self.nhead_kv,
@@ -54,29 +58,32 @@ class AttentionInterface(ABC):
         ana = SDPAAnalyzer(record)
         total_flop = ana.getFLOP()
         tflops = total_flop * 1e-6 / device_us
-        meta.tflops = tflops
+        meta.tflops[self.name] = tflops
         return meta
 
 
 @dataclass
 class AttentionOpMeta:
-    batch_size: int
-    seq_len: int
-    nhead_q: int
-    nhead_kv: int
-    head_dim: int
-    dtype: str
+    model_name: str = ""
+    dtype: str = ""
+    batch_size: int = 0
+    seq_len: int = 0
+    nhead_q: int = 0
+    nhead_kv: int = 0
+    head_dim: int = 0
     flag: str = ""
     count: int = 1
     is_causal: bool = True
-    model_name: str = ""
     tp_size: int = 1
-    tflops: float = 0.0
+    tflops: dict = field(default_factory=dict)
 
 
 class ExtractAttentionsBase:
     def __init__(self, config_file):
         self.load_config(config_file)
+
+    def set_dtype(self, dtype: str):
+        self.dtype = dtype
 
     def load_config(self, config_file):
         with open(config_file, 'r', encoding='utf-8') as f:
@@ -90,7 +97,7 @@ class ExtractAttentionsBase:
         else:
             self.head_dim = divide_and_check_no_remainder(
                 self.hidden_size, self.config['num_attention_heads'])
-        self.model_name = os.path.basename(config_file)
+        self.model_name = os.path.basename(config_file).replace('.json', '')
 
     def extract_attentions(self, batch_size=1, seq_len=1, tp_size=1):
         nhead_q = divide_and_check_no_remainder(
@@ -196,6 +203,9 @@ if __name__ == '__main__':
         print(f"{batch_size}, {seq_len}, {nhead_q}, {nhead_kv}, {head_dim}")
 
     class TorchAttentionTest(AttentionInterface):
+        def __init__(self):
+            super().__init__('torch', 'cuda')
+
         def eval(self):
             return F.scaled_dot_product_attention(self.q, self.k, self.v, dropout_p=0.0, is_causal=True)
 
